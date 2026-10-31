@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -73,6 +72,8 @@ func newMCP(desk *Desk) *mcp.Server {
 	return srv
 }
 
+// addTool runs f under the server's lock. The SDK sends what f returns as JSON (text and structuredContent)
+// and an error as a tool error.
 func addTool[In any](srv *mcp.Server, s *Server, name string, readOnly bool, desc string, f func(In) (any, error)) {
 	mcp.AddTool(srv, &mcp.Tool{Name: name, Description: desc, Annotations: &mcp.ToolAnnotations{ReadOnlyHint: readOnly}},
 		func(_ context.Context, _ *mcp.CallToolRequest, in In) (*mcp.CallToolResult, any, error) {
@@ -81,13 +82,8 @@ func addTool[In any](srv *mcp.Server, s *Server, name string, readOnly bool, des
 			out, err := f(in)
 			if err != nil {
 				slog.Warn("tool refused", "tool", name, "err", err)
-				return nil, nil, err
 			}
-			text, err := json.MarshalIndent(out, "", " ")
-			if err != nil {
-				return nil, nil, err
-			}
-			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: string(text)}}}, nil, nil
+			return nil, out, err
 		})
 }
 
@@ -113,8 +109,11 @@ func displayName(got Reply, st strip) any {
 
 // linkedWith is the pair partner's id when the desk says the pair is linked.
 func linkedWith(got Reply, st strip) (string, bool) {
-	partner, ok := st.partner()
-	if args := got[st.linkAddr()]; ok && len(args) > 0 && args[0] == int32(1) {
+	partner, link, ok := st.pair()
+	if !ok {
+		return "", false
+	}
+	if args := got[link]; len(args) > 0 && args[0] == int32(1) {
 		return partner.id(), true
 	}
 	return "", false
@@ -123,7 +122,7 @@ func linkedWith(got Reply, st strip) (string, bool) {
 func (s *Server) allNames() (map[strip]string, Reply, error) {
 	var addrs []string
 	for _, st := range allStrips() {
-		addrs = append(addrs, st.nameAddr(), st.linkAddr())
+		addrs = append(addrs, st.headerAddrs()...)
 	}
 	got := s.desk.Get(addrs...)
 	if len(got) == 0 {
@@ -211,31 +210,30 @@ func (s *Server) getStrip(in stripArg) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	k := st.k()
 	tree := map[string]any{"fader_db": st.fader(), "muted": st.mute()}
-	if k.pan {
+	if st.k.pan {
 		tree["pan"] = st.pan()
 	}
-	if k.bands > 0 {
+	if st.k.bands > 0 {
 		var bands []any
-		for b := 1; b <= k.bands; b++ {
+		for b := 1; b <= st.k.bands; b++ {
 			band := map[string]any{"band": b}
-			for f := range eqFields {
-				band[st.eq(b, f).name] = st.eq(b, f)
+			for _, f := range bandFields {
+				band[f.name] = st.eq(b, f)
 			}
 			bands = append(bands, band)
 		}
 		tree["eq"] = map[string]any{"on": st.eqOn(), "bands": bands}
 	}
-	if k.dyn {
+	if st.k.comp {
 		comp := map[string]any{}
-		for f := range dynFields {
-			comp[st.dyn(f).name] = st.dyn(f)
+		for _, f := range dynFields {
+			comp[f.name] = st.dyn(f)
 		}
 		tree["comp"] = comp
 	}
-	addrs := []string{st.nameAddr(), st.linkAddr()}
-	if k.preamp {
+	addrs := st.headerAddrs()
+	if st.k.input > 0 {
 		addrs = append(addrs, st.haIndexAddr())
 	}
 	collect(tree, &addrs)
@@ -248,7 +246,7 @@ func (s *Server) getStrip(in stripArg) (any, error) {
 	if partner, ok := linkedWith(got, st); ok {
 		out["linked_with"] = partner
 	}
-	if k.preamp {
+	if st.k.input > 0 {
 		out["preamp"] = s.preamp(got, st)
 	}
 	return out, nil
@@ -271,41 +269,34 @@ func (s *Server) preamp(got Reply, st strip) any {
 	return fill(tree, s.desk.Get(addrs...))
 }
 
+// write is a value a tool was asked to set; apply checks it.
 type write struct {
 	p   param
 	val any
 }
 
-// field is an optional number a tool was given for a param.
-type field struct {
-	v *float64
-	p param
-}
-
-// numeric turns the given fields into writes after checking each against what the desk can hold.
-func numeric(fs ...field) ([]write, error) {
-	var ws []write
-	for _, f := range fs {
-		if f.v == nil {
-			continue
-		}
-		if err := f.p.check(*f.v); err != nil {
-			return nil, err
-		}
-		ws = append(ws, write{f.p, *f.v})
+// opt adds a write when the tool was given that optional argument.
+func opt[T any](ws []write, v *T, p param) []write {
+	if v == nil {
+		return ws
 	}
-	return ws, nil
+	return append(ws, write{p, *v})
 }
 
-// apply is the safety rule: read the current values, refuse and send nothing if the desk does not answer,
-// then send, then read back and report {from, to}.
+// apply is the safety rule: refuse a value the desk cannot hold, read the current values and refuse if the
+// desk does not answer, so nothing is sent; then send, read back and report {from, to}.
 func (s *Server) apply(st strip, ws []write) (any, error) {
 	if len(ws) == 0 {
 		return nil, errors.New("give at least one value to change")
 	}
-	addrs := []string{st.nameAddr(), st.linkAddr()}
-	for _, w := range ws {
-		addrs = append(addrs, w.p.addr)
+	args := make([]any, len(ws))
+	addrs := st.headerAddrs()
+	for i, w := range ws {
+		arg, err := w.p.wire(w.val)
+		if err != nil {
+			return nil, err
+		}
+		args[i], addrs = arg, append(addrs, w.p.addr)
 	}
 	before := s.desk.Get(addrs...)
 	from := map[string]any{}
@@ -316,13 +307,16 @@ func (s *Server) apply(st strip, ws []write) (any, error) {
 		}
 		from[w.p.name] = v
 	}
-	for _, w := range ws {
+	for i, w := range ws {
 		slog.Info("set", "strip", st.id(), "param", w.p.name, "from", from[w.p.name], "to", w.val)
-		if err := s.desk.Set(w.p.addr, w.p.encode(w.val)); err != nil {
+		if err := s.desk.Set(w.p.addr, args[i]); err != nil {
 			return nil, err
 		}
 	}
-	after := s.desk.Get(addrs...)
+	return report(st, ws, from, before, s.desk.Get(addrs...)), nil
+}
+
+func report(st strip, ws []write, from map[string]any, before, after Reply) map[string]any {
 	changed := map[string]any{}
 	for _, w := range ws {
 		changed[w.p.name] = map[string]any{"from": from[w.p.name], "to": after.valueOrNil(w.p)}
@@ -332,10 +326,10 @@ func (s *Server) apply(st strip, ws []write) (any, error) {
 		out["linked_with"] = partner
 		out["note"] = "this strip is linked: the desk may apply the change to " + partner + " as well"
 	}
-	return out, nil
+	return out
 }
 
-// change resolves the strip, lets `build` validate the arguments into writes, and applies them.
+// change resolves the strip, lets `build` turn the arguments into writes, and applies them.
 func (s *Server) change(ref string, build func(strip) ([]write, error)) (any, error) {
 	st, err := s.resolve(ref)
 	if err != nil {
@@ -349,7 +343,7 @@ func (s *Server) change(ref string, build func(strip) ([]write, error)) (any, er
 }
 
 func (s *Server) setFader(in faderArgs) (any, error) {
-	return s.change(in.Strip, func(st strip) ([]write, error) { return numeric(field{&in.DB, st.fader()}) })
+	return s.change(in.Strip, func(st strip) ([]write, error) { return []write{{st.fader(), in.DB}}, nil })
 }
 
 func (s *Server) setMute(in muteArgs) (any, error) {
@@ -358,23 +352,25 @@ func (s *Server) setMute(in muteArgs) (any, error) {
 
 func (s *Server) setEQBand(in eqArgs) (any, error) {
 	return s.change(in.Strip, func(st strip) ([]write, error) {
-		if n := st.k().bands; in.Band < 1 || in.Band > n {
+		if n := st.k.bands; in.Band < 1 || in.Band > n {
 			return nil, fmt.Errorf("%s has %d EQ bands; band %d does not exist", st.id(), n, in.Band)
 		}
-		return numeric(field{in.GainDB, st.eq(in.Band, "g")}, field{in.FreqHz, st.eq(in.Band, "f")}, field{in.Q, st.eq(in.Band, "q")})
+		ws := opt(nil, in.GainDB, st.eq(in.Band, bandGain))
+		ws = opt(ws, in.FreqHz, st.eq(in.Band, bandFreq))
+		return opt(ws, in.Q, st.eq(in.Band, bandQ)), nil
 	})
 }
 
 func (s *Server) setComp(in compArgs) (any, error) {
 	return s.change(in.Strip, func(st strip) ([]write, error) {
-		if !st.k().dyn {
+		if !st.k.comp {
 			return nil, fmt.Errorf("%s has no comp (only inputs, buses, matrices and mains do)", st.id())
 		}
-		ws, err := numeric(field{in.Threshold, st.dyn("thr")}, field{in.Ratio, st.dyn("ratio")}, field{in.MakeupDB, st.dyn("mgain")},
-			field{in.AttackMs, st.dyn("attack")}, field{in.ReleaseMs, st.dyn("release")})
-		if in.On != nil { // last, so a new threshold is in place when the comp switches on
-			ws = append(ws, write{st.dyn("on"), *in.On})
-		}
-		return ws, err
+		ws := opt(nil, in.Threshold, st.dyn(dynThr))
+		ws = opt(ws, in.Ratio, st.dyn(dynRatio))
+		ws = opt(ws, in.MakeupDB, st.dyn(dynMakeup))
+		ws = opt(ws, in.AttackMs, st.dyn(dynAttack))
+		ws = opt(ws, in.ReleaseMs, st.dyn(dynRelease))
+		return opt(ws, in.On, st.dyn(dynOn)), nil // on last, so a new threshold is in place when the comp switches on
 	})
 }

@@ -1,10 +1,34 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"slices"
 )
+
+// codec turns a parameter's desk argument into a real value and back. encode refuses what the desk
+// cannot hold (nothing is clamped); decode is false for an argument of the wrong type.
+type codec interface {
+	decode(arg any) (any, bool)
+	encode(v any) (any, error)
+}
+
+// param is one desk address and how its argument converts. A param without a codec panics on first use.
+type param struct {
+	name string // key in tool output
+	addr string
+	codec
+}
+
+// wire is encode with the parameter named in the refusal.
+func (p param) wire(v any) (any, error) {
+	arg, err := p.encode(v)
+	if err != nil {
+		return nil, fmt.Errorf("%s %v %w; nothing was sent", p.name, v, err)
+	}
+	return arg, nil
+}
 
 // scale maps the desk's 0...1 float to real units. The desk snaps every value to a grid of `steps`
 // positions (Thumbmix ParamScale, Core/Sources/ThumbmixCore/M32/ParamScale.swift).
@@ -17,26 +41,34 @@ type scale struct {
 
 // Ranges and grids from Maillot's protocol doc v4.09 as ported in Thumbmix Catalog.swift (doc p.25-26, 43).
 var (
-	eqFreq     = scale{20, 20000, 201, true, "Hz"}
-	eqGain     = scale{-15, 15, 121, false, "dB"} // step 0.25
-	eqQ        = scale{10, 0.3, 72, true, ""}     // runs high to low
-	compThr    = scale{-60, 0, 121, false, "dB"}  // step 0.5
-	compMake   = scale{0, 24, 49, false, "dB"}    // step 0.5
-	compAtt    = scale{0, 120, 121, false, "ms"}  // step 1
-	compRel    = scale{5, 4000, 101, true, "ms"}
-	panScale   = scale{-100, 100, 101, false, ""} // step 2
-	headGain   = scale{-12, 60, 145, false, "dB"} // step 0.5
-	faderRange = scale{lo: faderFloor, hi: 10, unit: "dB"}
-	compRatio  = []any{1.1, 1.3, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 7.0, 10.0, 20.0, 100.0}
-	eqTypes    = []any{"LCut", "LShv", "PEQ", "VEQ", "HShv", "HCut", "BU6", "BU12", "BS12", "LR12", "BU18", "BU24", "BS24", "LR24"}
-	dynModes   = []any{"COMP", "EXP"}
+	eqFreq    = scale{20, 20000, 201, true, "Hz"}
+	eqGain    = scale{-15, 15, 121, false, "dB"} // step 0.25
+	eqQ       = scale{10, 0.3, 72, true, ""}     // runs high to low
+	compThr   = scale{-60, 0, 121, false, "dB"}  // step 0.5
+	compMake  = scale{0, 24, 49, false, "dB"}    // step 0.5
+	compAtt   = scale{0, 120, 121, false, "ms"}  // step 1
+	compRel   = scale{5, 4000, 101, true, "ms"}
+	panScale  = scale{-100, 100, 101, false, ""} // step 2
+	headGain  = scale{-12, 60, 145, false, "dB"} // step 0.5
+	compRatio = choice[float64]{1.1, 1.3, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 7.0, 10.0, 20.0, 100.0}
+	eqTypes   = choice[string]{"LCut", "LShv", "PEQ", "VEQ", "HShv", "HCut", "BU6", "BU12", "BS12", "LR12", "BU18", "BU24", "BS24", "LR24"}
+	dynModes  = choice[string]{"COMP", "EXP"}
 )
 
-func clamp01(w float64) float64 { return math.Min(math.Max(w, 0), 1) }
+func (s scale) decode(arg any) (any, bool) {
+	w, ok := arg.(float32)
+	if !ok {
+		return nil, false
+	}
+	return s.value(float64(w)), true
+}
 
-func snap(w float64, steps int) float32 {
-	n := float64(steps - 1)
-	return float32(math.Round(clamp01(w)*n) / n)
+func (s scale) encode(v any) (any, error) {
+	f, err := number(v, s.lo, s.hi, s.unit)
+	if err != nil {
+		return nil, err
+	}
+	return s.wire(f), nil
 }
 
 func (s scale) value(w float64) float64 {
@@ -54,12 +86,24 @@ func (s scale) wire(v float64) float32 {
 	return snap((v-s.lo)/(s.hi-s.lo), s.steps)
 }
 
-func (s scale) check(name string, v float64) error {
-	lo, hi := math.Min(s.lo, s.hi), math.Max(s.lo, s.hi)
-	if v < lo || v > hi || math.IsNaN(v) {
-		return fmt.Errorf("%s %v is out of range (%v to %v %s); nothing was sent", name, v, lo, hi, s.unit)
+// number refuses anything but a number from lo to hi (in either order).
+func number(v any, lo, hi float64, unit string) (float64, error) {
+	f, ok := v.(float64)
+	if !ok {
+		return 0, errors.New("is not a number")
 	}
-	return nil
+	lo, hi = min(lo, hi), max(lo, hi)
+	if !(f >= lo && f <= hi) { // NaN fails too
+		return 0, fmt.Errorf("is out of range (%v to %v %s)", lo, hi, unit)
+	}
+	return f, nil
+}
+
+func clamp01(w float64) float64 { return math.Min(math.Max(w, 0), 1) }
+
+func snap(w float64, steps int) float32 {
+	n := float64(steps - 1)
+	return float32(math.Round(clamp01(w)*n) / n)
 }
 
 func sig3(v float64) float64 {
@@ -70,7 +114,68 @@ func sig3(v float64) float64 {
 	return math.Round(v*f) / f
 }
 
+// toggle is the desk's 0/1 switch; inv reads 1 as false ("muted" is the desk's "on" turned round).
+type toggle struct{ inv bool }
+
+func (t toggle) decode(arg any) (any, bool) {
+	i, ok := arg.(int32)
+	if !ok {
+		return nil, false
+	}
+	return (i == 1) != t.inv, true
+}
+
+func (t toggle) encode(v any) (any, error) {
+	b, ok := v.(bool)
+	if !ok {
+		return nil, errors.New("is not true or false")
+	}
+	if b != t.inv {
+		return int32(1), nil
+	}
+	return int32(0), nil
+}
+
+// choice is the desk's list of options; the wire carries the index.
+type choice[T comparable] []T
+
+func (c choice[T]) decode(arg any) (any, bool) {
+	i, ok := arg.(int32)
+	if !ok || i < 0 || int(i) >= len(c) {
+		return nil, false
+	}
+	return c[i], true
+}
+
+func (c choice[T]) encode(v any) (any, error) {
+	if t, ok := v.(T); ok {
+		if i := slices.Index(c, t); i >= 0 {
+			return int32(i), nil
+		}
+	}
+	return nil, fmt.Errorf("is not one of %v", []T(c))
+}
+
 const faderFloor = -90.0
+
+// faderLaw is the fader's codec: its 4-segment taper is not a scale.
+type faderLaw struct{}
+
+func (faderLaw) decode(arg any) (any, bool) {
+	w, ok := arg.(float32)
+	if !ok {
+		return nil, false
+	}
+	return faderDB(float64(w)), true
+}
+
+func (faderLaw) encode(v any) (any, error) {
+	db, err := number(v, faderFloor, 10, "dB")
+	if err != nil {
+		return nil, err
+	}
+	return faderWire(db), nil
+}
 
 // faderDB is the 4-segment fader taper (Maillot doc p.131, Thumbmix FaderLaw.swift): 0.75 = 0 dB, 1.0 = +10 dB.
 // Wire 0 is -infinity, which JSON cannot carry: it reads -90, and 1/1023 reads -89.5.
@@ -110,81 +215,4 @@ func faderWire(db float64) float32 {
 		w = math.Min((db+30)/40, 1)
 	}
 	return snap(w, 1024)
-}
-
-type pkind int
-
-const (
-	pFader pkind = iota
-	pLevel
-	pToggle
-	pChoice
-)
-
-// param is one desk address and how its argument converts to and from real units.
-type param struct {
-	name string // key in tool output
-	addr string
-	kind pkind
-	sc   scale // pLevel
-	opts []any // pChoice: the real value of each index
-	inv  bool  // pToggle: true reads as 0 ("muted" is the desk's "on" turned round)
-}
-
-// check refuses a value the desk cannot hold; nothing is clamped.
-func (p param) check(v float64) error {
-	switch p.kind {
-	case pFader:
-		return faderRange.check(p.name, v)
-	case pChoice:
-		if !slices.Contains(p.opts, any(v)) {
-			return fmt.Errorf("%s %v is not one of %v; nothing was sent", p.name, v, p.opts)
-		}
-		return nil
-	}
-	return p.sc.check(p.name, v)
-}
-
-// decode turns the desk's argument into a real value; false when it has the wrong type.
-func (p param) decode(arg any) (any, bool) {
-	switch v := arg.(type) {
-	case float32:
-		switch p.kind {
-		case pFader:
-			return faderDB(float64(v)), true
-		case pLevel:
-			return p.sc.value(float64(v)), true
-		}
-	case int32:
-		switch p.kind {
-		case pToggle:
-			return (v == 1) != p.inv, true
-		case pChoice:
-			if v >= 0 && int(v) < len(p.opts) {
-				return p.opts[v], true
-			}
-		}
-	}
-	return nil, false
-}
-
-// encode turns a validated real value into the desk's argument.
-func (p param) encode(v any) any {
-	switch p.kind {
-	case pFader:
-		return faderWire(v.(float64))
-	case pLevel:
-		return p.sc.wire(v.(float64))
-	case pToggle:
-		if v.(bool) != p.inv {
-			return int32(1)
-		}
-		return int32(0)
-	}
-	for i, o := range p.opts {
-		if o == v {
-			return int32(i)
-		}
-	}
-	panic(fmt.Sprintf("%s: %v is not an option", p.name, v))
 }

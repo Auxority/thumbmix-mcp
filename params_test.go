@@ -98,16 +98,18 @@ func TestLinearScales(t *testing.T) {
 
 // Thumbmix ParamScaleTests.choiceTravelsAsInt / toggleTravelsAsInt.
 func TestChoiceAndToggleTravelAsInt(t *testing.T) {
-	ratio := param{kind: pChoice, opts: compRatio}
-	if got := ratio.encode(2.0); got != int32(3) {
-		t.Errorf("ratio 2.0 encodes %v, want int 3", got)
+	if got, err := compRatio.encode(2.0); err != nil || got != int32(3) {
+		t.Errorf("ratio 2.0 encodes %v, %v; want int 3", got, err)
 	}
-	if v, ok := ratio.decode(int32(3)); !ok || v != 2.0 {
+	if v, ok := compRatio.decode(int32(3)); !ok || v != 2.0 {
 		t.Errorf("index 3 decodes %v, %v", v, ok)
 	}
-	on := param{kind: pToggle}
-	if on.encode(true) != int32(1) || on.encode(false) != int32(0) {
-		t.Error("toggle encode")
+	on := toggle{}
+	if a, _ := on.encode(true); a != int32(1) {
+		t.Error("toggle encode true")
+	}
+	if a, _ := on.encode(false); a != int32(0) {
+		t.Error("toggle encode false")
 	}
 	if v, ok := on.decode(int32(0)); !ok || v != false {
 		t.Error("toggle decode")
@@ -116,24 +118,41 @@ func TestChoiceAndToggleTravelAsInt(t *testing.T) {
 
 // Thumbmix ParamScaleTests.wrongArgumentTypeIsNil.
 func TestDecodeWrongType(t *testing.T) {
-	if _, ok := (param{kind: pFader}).decode("x"); ok {
+	if _, ok := (faderLaw{}).decode("x"); ok {
 		t.Error("string is not a fader")
 	}
-	if _, ok := (param{kind: pToggle}).decode(float32(1)); ok {
+	if _, ok := (toggle{}).decode(float32(1)); ok {
 		t.Error("float is not a toggle")
 	}
-	if _, ok := (param{kind: pChoice, opts: eqTypes}).decode(int32(99)); ok {
+	if _, ok := eqTypes.decode(int32(99)); ok {
 		t.Error("index 99 is not an EQ type")
 	}
 }
 
-func TestCheckRefusesOutOfRange(t *testing.T) {
-	for _, v := range []float64{-15.1, 15.25, math.NaN()} {
-		if eqGain.check("gain_db", v) == nil {
-			t.Errorf("%v should be refused", v)
+func TestEncodeRefusesWhatTheDeskCannotHold(t *testing.T) {
+	for _, v := range []any{-15.1, 15.25, math.NaN(), "3", true} {
+		if _, err := eqGain.encode(v); err == nil {
+			t.Errorf("gain %v should be refused", v)
 		}
 	}
-	if eqGain.check("gain_db", 15) != nil || eqQ.check("q", 0.3) != nil || eqQ.check("q", 10) != nil {
-		t.Error("range ends are allowed")
+	for _, c := range []struct {
+		c codec
+		v any
+	}{{eqGain, 15.0}, {eqQ, 0.3}, {eqQ, 10.0}, {faderLaw{}, -90.0}, {faderLaw{}, 10.0}} {
+		if _, err := c.c.encode(c.v); err != nil {
+			t.Errorf("range end %v is allowed: %v", c.v, err)
+		}
+	}
+	if _, err := (faderLaw{}).encode(10.5); err == nil {
+		t.Error("fader +10.5 should be refused")
+	}
+	if _, err := (toggle{}).encode(1.0); err == nil {
+		t.Error("a number is not a switch")
+	}
+	if _, err := compRatio.encode(2.2); err == nil {
+		t.Error("ratio 2.2 is not an option")
+	}
+	if _, err := (param{"gain_db", "/x", eqGain}).wire(16.0); err == nil || err.Error() != "gain_db 16 is out of range (-15 to 15 dB); nothing was sent" {
+		t.Errorf("refusal names the parameter: %v", err)
 	}
 }

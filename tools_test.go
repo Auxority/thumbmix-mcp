@@ -27,7 +27,7 @@ func TestSetEQBandChangesTheDeskAndReportsFromTo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if g, _ := f.value(mustStrip("ch/01").eq(1, "g")); g != 3.0 {
+	if g, _ := f.value(mustStrip("ch/01").eq(1, bandGain)); g != 3.0 {
 		t.Errorf("desk gain = %v, want 3", g)
 	}
 	if got := changed(t, res, "gain_db"); got["from"] != 0.0 || got["to"] != 3.0 {
@@ -52,7 +52,7 @@ func TestSilentDeskRefusesAndSendsNothing(t *testing.T) {
 	if f.setCount() != 0 {
 		t.Errorf("%d sets reached the desk", f.setCount())
 	}
-	if g, _ := f.value(mustStrip("ch/01").eq(1, "g")); g != 0.0 {
+	if g, _ := f.value(mustStrip("ch/01").eq(1, bandGain)); g != 0.0 {
 		t.Errorf("gain moved to %v", g)
 	}
 }
@@ -60,7 +60,7 @@ func TestSilentDeskRefusesAndSendsNothing(t *testing.T) {
 func TestUnreadParameterRefusesTheWholeWrite(t *testing.T) {
 	f, s := bassDesk(t)
 	f.mu.Lock()
-	delete(f.vals, mustStrip("ch/01").eq(1, "q").addr) // the desk never answers this one
+	delete(f.vals, mustStrip("ch/01").eq(1, bandQ).addr) // the desk never answers this one
 	f.mu.Unlock()
 	_, err := s.setEQBand(eqArgs{Strip: "ch/01", Band: 1, GainDB: f64(3), Q: f64(1)})
 	if !errors.Is(err, errSilent) || !strings.Contains(err.Error(), "q") {
@@ -142,8 +142,9 @@ func TestSetMuteAndComp(t *testing.T) {
 
 func TestLinkedStripIsFlagged(t *testing.T) {
 	f, s := bassDesk(t)
+	_, link, _ := mustStrip("ch/01").pair()
 	f.mu.Lock()
-	f.vals[mustStrip("ch/01").linkAddr()] = []any{int32(1)}
+	f.vals[link] = []any{int32(1)}
 	f.mu.Unlock()
 	res, err := s.setMute(muteArgs{Strip: "ch/01", Muted: true})
 	if err != nil {
@@ -272,10 +273,16 @@ func TestMCPRoundTrip(t *testing.T) {
 	text := func(r *mcp.CallToolResult) string { return r.Content[0].(*mcp.TextContent).Text }
 
 	res := call("set_eq_band", map[string]any{"strip": "bass gtr", "band": 1, "gain_db": 2.5})
-	if res.IsError || !strings.Contains(text(res), `"to": 2.5`) {
+	var out struct {
+		Changed map[string]struct{ To float64 }
+	}
+	if res.IsError || json.Unmarshal([]byte(text(res)), &out) != nil || out.Changed["gain_db"].To != 2.5 {
 		t.Fatalf("set_eq_band: %v %s", res.IsError, text(res))
 	}
-	if g, _ := f.value(mustStrip("ch/01").eq(1, "g")); g != 2.5 {
+	if res.StructuredContent == nil {
+		t.Error("no structuredContent: a client that reads only that sees nothing")
+	}
+	if g, _ := f.value(mustStrip("ch/01").eq(1, bandGain)); g != 2.5 {
 		t.Errorf("desk gain = %v", g)
 	}
 

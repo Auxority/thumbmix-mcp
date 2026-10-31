@@ -19,10 +19,11 @@ func TestStripAddresses(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s not found", c.id)
 		}
-		if s.fader().addr != c.fader || s.mute().addr != c.on || s.linkAddr() != c.link {
-			t.Errorf("%s: %s %s %s", c.id, s.fader().addr, s.mute().addr, s.linkAddr())
+		_, link, _ := s.pair()
+		if s.fader().addr != c.fader || s.mute().addr != c.on || link != c.link {
+			t.Errorf("%s: %s %s %s", c.id, s.fader().addr, s.mute().addr, link)
 		}
-		if s.k().preamp && s.haIndexAddr() != c.ha {
+		if s.k.input > 0 && s.haIndexAddr() != c.ha {
 			t.Errorf("%s: headamp index %s, want %s", c.id, s.haIndexAddr(), c.ha)
 		}
 	}
@@ -98,12 +99,12 @@ func TestPickRefusesAmbiguousAndUnknown(t *testing.T) {
 }
 
 func TestPartner(t *testing.T) {
-	a, _ := idOf("bus/03")
-	b, ok := a.partner()
-	if !ok || b.id() != "bus/04" {
-		t.Errorf("partner of bus/03 = %v", b)
+	for a, b := range map[string]string{"bus/03": "bus/04", "bus/04": "bus/03", "ch/32": "ch/31"} {
+		if p, _, ok := mustStrip(a).pair(); !ok || p.id() != b {
+			t.Errorf("partner of %s = %v, want %s", a, p.id(), b)
+		}
 	}
-	if _, ok := mustStrip("dca/1").partner(); ok {
+	if _, _, ok := mustStrip("dca/1").pair(); ok {
 		t.Error("DCAs cannot link")
 	}
 }

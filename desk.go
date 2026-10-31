@@ -6,14 +6,13 @@ import (
 	"log/slog"
 	"net"
 	"strings"
-	"sync"
 	"time"
 )
 
 // Desk talks OSC over UDP to one console. The desk answers a "get" (the address with no arguments)
 // with the same address and the value; it stays silent for an address it does not know.
+// Not safe for concurrent use: Server runs one tool call at a time.
 type Desk struct {
-	mu      sync.Mutex
 	conn    net.Conn
 	timeout time.Duration // how long Get waits in total before giving up on a value
 }
@@ -34,15 +33,11 @@ func Dial(addr string, timeout time.Duration) (*Desk, error) {
 // Get asks for every address and returns what came back. Missing addresses are asked again twice;
 // whatever never answers is absent from the result.
 func (d *Desk) Get(addrs ...string) Reply {
-	d.mu.Lock()
-	defer d.mu.Unlock()
 	d.drain()
 	got := Reply{}
 	missing := map[string]bool{}
 	for _, a := range addrs {
-		if a != "" { // strips that cannot link have no link address
-			missing[a] = true
-		}
+		missing[a] = true
 	}
 	buf := make([]byte, 2048)
 	for round := 0; round < 3 && len(missing) > 0; round++ {
@@ -78,8 +73,6 @@ func (d *Desk) drain() {
 }
 
 func (d *Desk) Set(addr string, arg any) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
 	_, err := d.conn.Write(Message{Addr: addr, Args: []any{arg}}.Encode())
 	return err
 }

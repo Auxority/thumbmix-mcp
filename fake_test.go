@@ -60,7 +60,11 @@ func (f *fakeDesk) serve() {
 func (f *fakeDesk) seed(p param, v any) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.vals[p.addr] = []any{p.encode(v)}
+	arg, err := p.wire(v)
+	if err != nil {
+		panic(err)
+	}
+	f.vals[p.addr] = []any{arg}
 }
 
 func (f *fakeDesk) seedName(id, name string) {
@@ -100,20 +104,16 @@ func bassDesk(t *testing.T) (*fakeDesk, *Server) {
 	f.seedName("ch/03", "Snare")
 	f.seed(s.fader(), 0.0)
 	f.seed(s.mute(), false)
-	f.seed(s.eq(1, "type"), "PEQ")
-	f.seed(s.eq(1, "f"), 100.0)
-	f.seed(s.eq(1, "g"), 0.0)
-	f.seed(s.eq(1, "q"), 2.0)
-	for _, field := range []string{"on", "thr", "attack", "release", "mgain", "ratio", "mode"} {
-		p := s.dyn(field)
-		switch p.kind {
-		case pToggle:
-			f.seed(p, false)
-		case pChoice:
-			f.seed(p, p.opts[0])
-		default:
-			f.seed(p, p.sc.value(0.5))
-		}
-	}
+	f.seed(s.eq(1, bandType), "PEQ")
+	f.seed(s.eq(1, bandFreq), 100.0)
+	f.seed(s.eq(1, bandGain), 0.0)
+	f.seed(s.eq(1, bandQ), 2.0)
+	f.seed(s.dyn(dynOn), false)
+	f.seed(s.dyn(dynMode), "COMP")
+	f.seed(s.dyn(dynThr), -30.0)
+	f.seed(s.dyn(dynRatio), 1.1)
+	f.seed(s.dyn(dynAttack), 60.0)
+	f.seed(s.dyn(dynRelease), 141.0)
+	f.seed(s.dyn(dynMakeup), 12.0)
 	return f, &Server{desk: desk}
 }
