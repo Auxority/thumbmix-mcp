@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -37,7 +36,8 @@ type strip struct {
 	n int // 1-based, as printed on the desk
 }
 
-func allStrips() []strip {
+// allStrips lists every strip in desk order.
+var allStrips = func() []strip {
 	var all []strip
 	for i := range kinds {
 		for n := 1; n <= kinds[i].count; n++ {
@@ -45,7 +45,7 @@ func allStrips() []strip {
 		}
 	}
 	return all
-}
+}()
 
 func (s strip) prefix() string {
 	if s.k.count == 1 {
@@ -172,7 +172,7 @@ func canon(id string) string {
 // idOf finds a strip by its id ("ch/01", "/ch/1", "main/st").
 func idOf(ref string) (strip, bool) {
 	ref = canon(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(ref)), "/"))
-	for _, s := range allStrips() {
+	for _, s := range allStrips {
 		if ref == canon(s.id()) {
 			return s, true
 		}
@@ -185,7 +185,7 @@ func idOf(ref string) (strip, bool) {
 func pick(ref string, names map[strip]string) (strip, error) {
 	want := fold(ref)
 	var exact, partial []strip
-	for _, s := range allStrips() {
+	for _, s := range allStrips {
 		name, ok := names[s]
 		if !ok {
 			continue
@@ -214,6 +214,5 @@ func pick(ref string, names map[strip]string) (strip, error) {
 	for _, s := range found {
 		c = append(c, fmt.Sprintf("%s (%s)", s.id(), names[s]))
 	}
-	sort.Strings(c)
 	return strip{}, fmt.Errorf("%q is ambiguous: %s; use the id", ref, strings.Join(c, ", "))
 }

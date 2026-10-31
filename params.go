@@ -21,15 +21,6 @@ type param struct {
 	codec
 }
 
-// wire is encode with the parameter named in the refusal.
-func (p param) wire(v any) (any, error) {
-	arg, err := p.encode(v)
-	if err != nil {
-		return nil, fmt.Errorf("%s %v %w; nothing was sent", p.name, v, err)
-	}
-	return arg, nil
-}
-
 // scale maps the desk's 0...1 float to real units. The desk snaps every value to a grid of `steps`
 // positions (Thumbmix ParamScale, Core/Sources/ThumbmixCore/M32/ParamScale.swift).
 type scale struct {
@@ -99,7 +90,7 @@ func number(v any, lo, hi float64, unit string) (float64, error) {
 	return f, nil
 }
 
-func clamp01(w float64) float64 { return math.Min(math.Max(w, 0), 1) }
+func clamp01(w float64) float64 { return min(max(w, 0), 1) }
 
 func snap(w float64, steps int) float32 {
 	n := float64(steps - 1)

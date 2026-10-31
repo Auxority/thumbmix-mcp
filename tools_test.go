@@ -10,8 +10,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-func f64(v float64) *float64 { return &v }
-
 func changed(t *testing.T, res any, key string) map[string]any {
 	t.Helper()
 	m := res.(map[string]any)["changed"].(map[string]any)[key]
@@ -23,7 +21,7 @@ func changed(t *testing.T, res any, key string) map[string]any {
 
 func TestSetEQBandChangesTheDeskAndReportsFromTo(t *testing.T) {
 	f, s := bassDesk(t)
-	res, err := s.setEQBand(eqArgs{Strip: "ch/01", Band: 1, GainDB: f64(3), Q: f64(1)})
+	res, err := s.setEQBand(eqArgs{Strip: "ch/01", Band: 1, GainDB: new(3.0), Q: new(1.0)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +42,7 @@ func TestSetEQBandChangesTheDeskAndReportsFromTo(t *testing.T) {
 func TestSilentDeskRefusesAndSendsNothing(t *testing.T) {
 	f, s := bassDesk(t)
 	f.setSilent(true)
-	_, err := s.setEQBand(eqArgs{Strip: "ch/01", Band: 1, GainDB: f64(3)})
+	_, err := s.setEQBand(eqArgs{Strip: "ch/01", Band: 1, GainDB: new(3.0)})
 	if !errors.Is(err, errSilent) || !strings.Contains(err.Error(), "nothing was sent") {
 		t.Fatalf("err = %v", err)
 	}
@@ -59,10 +57,8 @@ func TestSilentDeskRefusesAndSendsNothing(t *testing.T) {
 
 func TestUnreadParameterRefusesTheWholeWrite(t *testing.T) {
 	f, s := bassDesk(t)
-	f.mu.Lock()
-	delete(f.vals, mustStrip("ch/01").eq(1, bandQ).addr) // the desk never answers this one
-	f.mu.Unlock()
-	_, err := s.setEQBand(eqArgs{Strip: "ch/01", Band: 1, GainDB: f64(3), Q: f64(1)})
+	f.seedRaw(mustStrip("ch/01").eq(1, bandQ).addr) // the desk never answers this one
+	_, err := s.setEQBand(eqArgs{Strip: "ch/01", Band: 1, GainDB: new(3.0), Q: new(1.0)})
 	if !errors.Is(err, errSilent) || !strings.Contains(err.Error(), "q") {
 		t.Fatalf("err = %v", err)
 	}
@@ -73,32 +69,37 @@ func TestUnreadParameterRefusesTheWholeWrite(t *testing.T) {
 
 func TestInvalidArgumentsAreRefusedNotClamped(t *testing.T) {
 	f, s := bassDesk(t)
-	cases := map[string]func() error{
-		"gain +16":      func() error { _, e := s.setEQBand(eqArgs{Strip: "ch/01", Band: 1, GainDB: f64(16)}); return e },
-		"freq 10 Hz":    func() error { _, e := s.setEQBand(eqArgs{Strip: "ch/01", Band: 1, FreqHz: f64(10)}); return e },
-		"q 11":          func() error { _, e := s.setEQBand(eqArgs{Strip: "ch/01", Band: 1, Q: f64(11)}); return e },
-		"band 5":        func() error { _, e := s.setEQBand(eqArgs{Strip: "ch/01", Band: 5, GainDB: f64(1)}); return e },
-		"no field":      func() error { _, e := s.setEQBand(eqArgs{Strip: "ch/01", Band: 1}); return e },
-		"dca eq":        func() error { _, e := s.setEQBand(eqArgs{Strip: "dca/1", Band: 1, GainDB: f64(1)}); return e },
-		"fader +11":     func() error { _, e := s.setFader(faderArgs{Strip: "ch/01", DB: 11}); return e },
-		"fader -91":     func() error { _, e := s.setFader(faderArgs{Strip: "ch/01", DB: -91}); return e },
-		"ratio 2.2":     func() error { _, e := s.setComp(compArgs{Strip: "ch/01", Ratio: f64(2.2)}); return e },
-		"threshold +1":  func() error { _, e := s.setComp(compArgs{Strip: "ch/01", Threshold: f64(1)}); return e },
-		"release 4001":  func() error { _, e := s.setComp(compArgs{Strip: "ch/01", ReleaseMs: f64(4001)}); return e },
-		"comp on aux":   func() error { _, e := s.setComp(compArgs{Strip: "auxin/01", MakeupDB: f64(1)}); return e },
-		"no comp field": func() error { _, e := s.setComp(compArgs{Strip: "ch/01"}); return e },
-		"unknown strip": func() error { _, e := s.setMute(muteArgs{Strip: "trombone", Muted: true}); return e },
-		"ambiguous":     func() error { _, e := s.setMute(muteArgs{Strip: "bass", Muted: true}); return e },
+	errs := map[string]error{
+		"gain +16":      errOf(s.setEQBand(eqArgs{Strip: "ch/01", Band: 1, GainDB: new(16.0)})),
+		"freq 10 Hz":    errOf(s.setEQBand(eqArgs{Strip: "ch/01", Band: 1, FreqHz: new(10.0)})),
+		"q 11":          errOf(s.setEQBand(eqArgs{Strip: "ch/01", Band: 1, Q: new(11.0)})),
+		"band 5":        errOf(s.setEQBand(eqArgs{Strip: "ch/01", Band: 5, GainDB: new(1.0)})),
+		"no field":      errOf(s.setEQBand(eqArgs{Strip: "ch/01", Band: 1})),
+		"dca eq":        errOf(s.setEQBand(eqArgs{Strip: "dca/1", Band: 1, GainDB: new(1.0)})),
+		"fader +11":     errOf(s.setFader(faderArgs{Strip: "ch/01", DB: 11})),
+		"fader -91":     errOf(s.setFader(faderArgs{Strip: "ch/01", DB: -91})),
+		"ratio 2.2":     errOf(s.setComp(compArgs{Strip: "ch/01", Ratio: new(2.2)})),
+		"threshold +1":  errOf(s.setComp(compArgs{Strip: "ch/01", Threshold: new(1.0)})),
+		"release 4001":  errOf(s.setComp(compArgs{Strip: "ch/01", ReleaseMs: new(4001.0)})),
+		"comp on aux":   errOf(s.setComp(compArgs{Strip: "auxin/01", MakeupDB: new(1.0)})),
+		"no comp field": errOf(s.setComp(compArgs{Strip: "ch/01"})),
+		"unknown strip": errOf(s.setMute(muteArgs{Strip: "trombone", Muted: true})),
+		"ambiguous":     errOf(s.setMute(muteArgs{Strip: "bass", Muted: true})),
 	}
-	for name, call := range cases {
-		if err := call(); err == nil {
+	for name, err := range errs {
+		if err == nil {
 			t.Errorf("%s: want a refusal", name)
 		}
+	}
+	if err := errs["gain +16"]; err == nil || err.Error() != "gain_db 16 is out of range (-15 to 15 dB); nothing was sent" {
+		t.Errorf("the refusal names the parameter and its range: %v", err)
 	}
 	if f.setCount() != 0 {
 		t.Errorf("%d sets reached the desk", f.setCount())
 	}
 }
+
+func errOf(_ any, err error) error { return err }
 
 func TestSetFaderByNameWritesTheRightStrip(t *testing.T) {
 	f, s := bassDesk(t)
@@ -128,7 +129,7 @@ func TestSetMuteAndComp(t *testing.T) {
 	if raw := f.vals[mustStrip("ch/01").mute().addr][0]; raw != int32(0) {
 		t.Errorf("the desk's on switch = %v, want 0 (mute is on turned round)", raw)
 	}
-	res, err := s.setComp(compArgs{Strip: "ch/01", Threshold: f64(-20), Ratio: f64(4), On: new(bool)})
+	res, err := s.setComp(compArgs{Strip: "ch/01", Threshold: new(-20.0), Ratio: new(4.0), On: new(bool)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,9 +144,7 @@ func TestSetMuteAndComp(t *testing.T) {
 func TestLinkedStripIsFlagged(t *testing.T) {
 	f, s := bassDesk(t)
 	_, link, _ := mustStrip("ch/01").pair()
-	f.mu.Lock()
-	f.vals[link] = []any{int32(1)}
-	f.mu.Unlock()
+	f.seedRaw(link, int32(1))
 	res, err := s.setMute(muteArgs{Strip: "ch/01", Muted: true})
 	if err != nil {
 		t.Fatal(err)
@@ -186,9 +185,7 @@ func TestGetStripNullsWhatTheDeskDidNotAnswer(t *testing.T) {
 func TestGetStripReadsThePreamp(t *testing.T) {
 	f, s := bassDesk(t)
 	ch := mustStrip("ch/01")
-	f.mu.Lock()
-	f.vals[ch.haIndexAddr()] = []any{int32(7)}
-	f.mu.Unlock()
+	f.seedRaw(ch.haIndexAddr(), int32(7))
 	f.seed(headampGain(7), 24.0)
 	f.seed(headampPhantom(7), true)
 	res, err := s.getStrip(stripArg{Strip: "ch/01"})
@@ -203,7 +200,7 @@ func TestGetStripReadsThePreamp(t *testing.T) {
 
 func TestListStrips(t *testing.T) {
 	_, s := bassDesk(t)
-	res, err := s.listStrips()
+	res, err := s.listStrips(struct{}{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,16 +219,14 @@ func TestListStrips(t *testing.T) {
 func TestListStripsFailsWhenSilent(t *testing.T) {
 	f, s := bassDesk(t)
 	f.setSilent(true)
-	if _, err := s.listStrips(); !errors.Is(err, errSilent) {
+	if _, err := s.listStrips(struct{}{}); !errors.Is(err, errSilent) {
 		t.Errorf("err = %v", err)
 	}
 }
 
 func TestRefusesAnythingThatIsNotAnM32(t *testing.T) {
 	f, desk := newFakeDesk(t)
-	f.mu.Lock()
-	f.vals["/xinfo"] = []any{"127.0.0.1", "Some", "Behringer Wing", "1.0"}
-	f.mu.Unlock()
+	f.seedRaw("/xinfo", "127.0.0.1", "Some", "Behringer Wing", "1.0")
 	if _, err := desk.Model(); err == nil || errors.Is(err, errSilent) {
 		t.Errorf("err = %v", err)
 	}

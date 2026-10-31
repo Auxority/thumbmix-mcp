@@ -60,17 +60,24 @@ func (f *fakeDesk) serve() {
 func (f *fakeDesk) seed(p param, v any) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	arg, err := p.wire(v)
+	arg, err := p.encode(v)
 	if err != nil {
 		panic(err)
 	}
 	f.vals[p.addr] = []any{arg}
 }
 
-func (f *fakeDesk) seedName(id, name string) {
+func (f *fakeDesk) seedName(id, name string) { f.seedRaw(mustStrip(id).nameAddr(), name) }
+
+// seedRaw stores the desk's own arguments for addr; none makes the desk silent for it.
+func (f *fakeDesk) seedRaw(addr string, args ...any) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.vals[mustStrip(id).nameAddr()] = []any{name}
+	if len(args) == 0 {
+		delete(f.vals, addr)
+		return
+	}
+	f.vals[addr] = args
 }
 
 func (f *fakeDesk) setCount() int {
@@ -88,11 +95,7 @@ func (f *fakeDesk) setSilent(v bool) {
 func (f *fakeDesk) value(p param) (any, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	args, ok := f.vals[p.addr]
-	if !ok {
-		return nil, false
-	}
-	return p.decode(args[0])
+	return Reply(f.vals).value(p)
 }
 
 // bassDesk has ch/01 "Bass Gtr" with a full EQ band 1 and comp, and ch/02 "Bass DI".

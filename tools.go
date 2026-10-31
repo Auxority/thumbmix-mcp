@@ -1,10 +1,12 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"strings"
 	"sync"
 
@@ -59,7 +61,7 @@ func newMCP(desk *Desk) *mcp.Server {
 		"Values snap to the desk's own steps, so `to` can differ slightly from what was asked. "
 	addTool(srv, s, "list_strips", true, "List every strip (inputs, aux ins, FX returns, buses, matrices, mains, DCAs) "+
 		"with its id, the name set on the desk, and linked_with when it is one side of a stereo pair. Use it to find strips by name.",
-		func(struct{}) (any, error) { return s.listStrips() })
+		s.listStrips)
 	addTool(srv, s, "get_strip", true, "Read one strip: fader_db (-90 = fully down), muted, pan (-100 left to 100 right), "+
 		"eq (on, bands with type, freq_hz, gain_db, q), comp (on, mode, threshold_db, ratio, attack_ms, release_ms, makeup_db) "+
 		"and, where a preamp feeds it, preamp (gain_db, phantom_48v; read only). null means the desk did not answer. "+stripDoc, s.getStrip)
@@ -87,54 +89,30 @@ func addTool[In any](srv *mcp.Server, s *Server, name string, readOnly bool, des
 		})
 }
 
-// rawName is the name set on the desk, which may be empty; false when the desk did not answer.
-func rawName(got Reply, st strip) (string, bool) {
-	if args := got[st.nameAddr()]; len(args) > 0 {
-		name, ok := args[0].(string)
-		return name, ok
+// header names the strip in every answer: its id, the name set on the desk (its default name when empty;
+// null when the desk did not answer), and linked_with when the desk says its stereo pair is linked.
+func header(got Reply, st strip) map[string]any {
+	out := map[string]any{"id": st.id(), "name": nil}
+	if name, ok := got.first(st.nameAddr()).(string); ok {
+		out["name"] = cmp.Or(name, st.defaultName())
 	}
-	return "", false
+	if partner, link, ok := st.pair(); ok && got.first(link) == int32(1) {
+		out["linked_with"] = partner.id()
+	}
+	return out
 }
 
-func displayName(got Reply, st strip) any {
-	name, ok := rawName(got, st)
-	switch {
-	case !ok:
-		return nil
-	case name == "":
-		return st.defaultName()
-	}
-	return name
-}
-
-// linkedWith is the pair partner's id when the desk says the pair is linked.
-func linkedWith(got Reply, st strip) (string, bool) {
-	partner, link, ok := st.pair()
-	if !ok {
-		return "", false
-	}
-	if args := got[link]; len(args) > 0 && args[0] == int32(1) {
-		return partner.id(), true
-	}
-	return "", false
-}
-
-func (s *Server) allNames() (map[strip]string, Reply, error) {
+// readAll asks the desk for addrsOf every strip; errSilent when nothing answers.
+func (s *Server) readAll(addrsOf func(strip) []string) (Reply, error) {
 	var addrs []string
-	for _, st := range allStrips() {
-		addrs = append(addrs, st.headerAddrs()...)
+	for _, st := range allStrips {
+		addrs = append(addrs, addrsOf(st)...)
 	}
 	got := s.desk.Get(addrs...)
 	if len(got) == 0 {
-		return nil, nil, errSilent
+		return nil, errSilent
 	}
-	names := map[strip]string{}
-	for _, st := range allStrips() {
-		if name, ok := rawName(got, st); ok {
-			names[st] = name
-		}
-	}
-	return names, got, nil
+	return got, nil
 }
 
 func (s *Server) resolve(ref string) (strip, error) {
@@ -144,25 +122,27 @@ func (s *Server) resolve(ref string) (strip, error) {
 	if st, ok := idOf(ref); ok {
 		return st, nil
 	}
-	names, _, err := s.allNames()
+	got, err := s.readAll(func(st strip) []string { return []string{st.nameAddr()} })
 	if err != nil {
 		return strip{}, err
+	}
+	names := map[strip]string{}
+	for _, st := range allStrips {
+		if name, ok := got.first(st.nameAddr()).(string); ok {
+			names[st] = name
+		}
 	}
 	return pick(ref, names)
 }
 
-func (s *Server) listStrips() (any, error) {
-	_, got, err := s.allNames()
+func (s *Server) listStrips(struct{}) (any, error) {
+	got, err := s.readAll(strip.headerAddrs)
 	if err != nil {
 		return nil, err
 	}
 	var list []map[string]any
-	for _, st := range allStrips() {
-		e := map[string]any{"id": st.id(), "name": displayName(got, st)}
-		if partner, ok := linkedWith(got, st); ok {
-			e["linked_with"] = partner
-		}
-		list = append(list, e)
+	for _, st := range allStrips {
+		list = append(list, header(got, st))
 	}
 	return map[string]any{"strips": list}, nil
 }
@@ -241,11 +221,8 @@ func (s *Server) getStrip(in stripArg) (any, error) {
 	if len(got) == 0 {
 		return nil, errSilent
 	}
-	out := fill(tree, got).(map[string]any)
-	out["id"], out["name"] = st.id(), displayName(got, st)
-	if partner, ok := linkedWith(got, st); ok {
-		out["linked_with"] = partner
-	}
+	out := header(got, st)
+	maps.Copy(out, fill(tree, got).(map[string]any))
 	if st.k.input > 0 {
 		out["preamp"] = s.preamp(got, st)
 	}
@@ -255,11 +232,10 @@ func (s *Server) getStrip(in stripArg) (any, error) {
 // preamp reads the headamp that feeds the strip (doc p.43). null: the desk did not say which one.
 // An internal source (index -1) has no preamp.
 func (s *Server) preamp(got Reply, st strip) any {
-	args := got[st.haIndexAddr()]
-	if len(args) == 0 {
+	idx, ok := got.first(st.haIndexAddr()).(int32)
+	if !ok {
 		return nil
 	}
-	idx, _ := args[0].(int32)
 	if idx < 0 {
 		return map[string]any{"source": "internal"}
 	}
@@ -290,41 +266,38 @@ func (s *Server) apply(st strip, ws []write) (any, error) {
 		return nil, errors.New("give at least one value to change")
 	}
 	args := make([]any, len(ws))
-	addrs := st.headerAddrs()
+	var addrs []string
 	for i, w := range ws {
-		arg, err := w.p.wire(w.val)
+		arg, err := w.p.encode(w.val)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%s %v %w; nothing was sent", w.p.name, w.val, err)
 		}
 		args[i], addrs = arg, append(addrs, w.p.addr)
 	}
-	before := s.desk.Get(addrs...)
-	from := map[string]any{}
+	before := s.desk.Get(append(st.headerAddrs(), addrs...)...)
 	for _, w := range ws {
-		v, ok := before.value(w.p)
-		if !ok {
+		if _, ok := before.value(w.p); !ok {
 			return nil, fmt.Errorf("%w: no reply for %s %s; nothing was sent", errSilent, st.id(), w.p.name)
 		}
-		from[w.p.name] = v
 	}
 	for i, w := range ws {
-		slog.Info("set", "strip", st.id(), "param", w.p.name, "from", from[w.p.name], "to", w.val)
+		slog.Info("set", "strip", st.id(), "param", w.p.name, "from", before.valueOrNil(w.p), "to", w.val)
 		if err := s.desk.Set(w.p.addr, args[i]); err != nil {
 			return nil, err
 		}
 	}
-	return report(st, ws, from, before, s.desk.Get(addrs...)), nil
+	return report(st, ws, before, s.desk.Get(addrs...)), nil
 }
 
-func report(st strip, ws []write, from map[string]any, before, after Reply) map[string]any {
+func report(st strip, ws []write, before, after Reply) map[string]any {
 	changed := map[string]any{}
 	for _, w := range ws {
-		changed[w.p.name] = map[string]any{"from": from[w.p.name], "to": after.valueOrNil(w.p)}
+		changed[w.p.name] = map[string]any{"from": before.valueOrNil(w.p), "to": after.valueOrNil(w.p)}
 	}
-	out := map[string]any{"strip": st.id(), "name": displayName(before, st), "changed": changed}
-	if partner, ok := linkedWith(before, st); ok {
-		out["linked_with"] = partner
-		out["note"] = "this strip is linked: the desk may apply the change to " + partner + " as well"
+	out := header(before, st)
+	out["changed"] = changed
+	if partner, ok := out["linked_with"]; ok {
+		out["note"] = fmt.Sprintf("this strip is linked: the desk may apply the change to %s as well", partner)
 	}
 	return out
 }

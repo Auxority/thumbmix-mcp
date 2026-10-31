@@ -90,14 +90,16 @@ func (d *Desk) Model() (string, error) {
 	return model, nil
 }
 
-// value decodes the answer for a param; false when it is missing or has an unexpected type.
-func (r Reply) value(p param) (any, bool) {
-	args := r[p.addr]
-	if len(args) == 0 {
-		return nil, false
+// first is the first argument of the answer for addr; nil when the desk did not answer.
+func (r Reply) first(addr string) any {
+	if args := r[addr]; len(args) > 0 {
+		return args[0]
 	}
-	return p.decode(args[0])
+	return nil
 }
+
+// value decodes the answer for a param; false when it is missing or has an unexpected type.
+func (r Reply) value(p param) (any, bool) { return p.decode(r.first(p.addr)) }
 
 // valueOrNil is value for output: what the desk did not answer is null, never a guess.
 func (r Reply) valueOrNil(p param) any {

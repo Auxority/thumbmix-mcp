@@ -152,7 +152,4 @@ func TestEncodeRefusesWhatTheDeskCannotHold(t *testing.T) {
 	if _, err := compRatio.encode(2.2); err == nil {
 		t.Error("ratio 2.2 is not an option")
 	}
-	if _, err := (param{"gain_db", "/x", eqGain}).wire(16.0); err == nil || err.Error() != "gain_db 16 is out of range (-15 to 15 dB); nothing was sent" {
-		t.Errorf("refusal names the parameter: %v", err)
-	}
 }

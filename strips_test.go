@@ -31,7 +31,7 @@ func TestStripAddresses(t *testing.T) {
 
 func TestStripCountsMatchThumbmix(t *testing.T) {
 	counts := map[string]int{}
-	for _, s := range allStrips() {
+	for _, s := range allStrips {
 		counts[strings.Split(s.id(), "/")[0]]++
 	}
 	want := map[string]int{"ch": 32, "auxin": 8, "fxrtn": 8, "bus": 16, "mtx": 6, "main": 2, "dca": 8}
